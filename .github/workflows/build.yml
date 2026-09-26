@@ -1,0 +1,99 @@
+name: Build Nevis from ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nevis-zip-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  editor-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: source/NevisPad
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract uploaded source ZIP
+        working-directory: .
+        run: |
+          test -f NevisPad-v0.1-source.zip
+          mkdir -p source
+          unzip -q NevisPad-v0.1-source.zip -d source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check source and bundled resources
+        run: |
+          python3 scripts/verify.py
+          node --check NevisPad/Web/core.js
+          node --check NevisPad/Web/formats.js
+          node --check NevisPad/Web/app.js
+          node tests/vendor-smoke.cjs
+      - name: Install browser test tools
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium webkit
+      - name: Test editing, persistence, DOCX and unsafe imports
+        run: node tests/browser.mjs
+      - name: Upload editor screenshots and test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nevis-editor-checks
+          path: source/NevisPad/test-results/
+          if-no-files-found: ignore
+
+  build-ipa:
+    needs: editor-checks
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: source/NevisPad
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract uploaded source ZIP
+        working-directory: .
+        run: |
+          test -f NevisPad-v0.1-source.zip
+          mkdir -p source
+          unzip -q NevisPad-v0.1-source.zip -d source
+      - name: Show compiler version
+        run: xcodebuild -version
+      - name: Install project generator
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+          xcodegen generate --spec project.yml
+      - name: Build for a physical iPad
+        run: |
+          set -o pipefail
+          xcodebuild -project NevisPad.xcodeproj -scheme NevisPad \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
+            build 2>&1 | tee build.log
+      - name: Package unsigned IPA
+        run: bash scripts/package-ipa.sh
+      - name: Upload IPA for sideloading
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nevis-unsigned-IPA
+          path: source/NevisPad/dist/Nevis-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload compiler log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nevis-build-log
+          path: source/NevisPad/build.log
+          if-no-files-found: ignore
